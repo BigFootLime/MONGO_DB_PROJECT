@@ -2,7 +2,7 @@
 
 This repo is for my MongoDB TP.
 
-Right now it only covers Part 1 and Part 2.
+Right now it covers Part 1, Part 2, and Part 3.
 
 ## What I used
 
@@ -15,7 +15,7 @@ I used Docker for MongoDB because it was already working on the PC and it made t
 
 ## Files
 
-- `queries.js` -> main script for Part 1 and Part 2
+- `queries.js` -> main script for Part 1, Part 2, and Part 3
 - `screenshots/` -> screenshot guide and captures
 - `worklog.md` -> personal notes while doing the lab
 
@@ -71,6 +71,7 @@ It just runs the work in one place so I can redo everything after a fresh import
 - converts important fields to better types
 - creates `transactions_lab` for update/delete questions
 - runs the Part 2 queries
+- runs the Part 3 analysis queries
 - archives matching rows in `archive_transactions`
 
 ## Results I got on this dataset
@@ -102,6 +103,48 @@ It just runs the work in one place so I can redo everything after a fresh import
 - Q2.3.3 January 2025 anonymization -> `12691` matched and `12691` modified
 - Q2.4.1 with `Failed_Transaction_Count >= 2` -> `772` archived and `772` deleted from `transactions_lab`
 
+### Part 3
+
+- Q3.1.1 fraud hours:
+  - highest hour: `21h` with `118` frauds
+  - then `13h` with `114`
+  - then `7h` with `113`
+- Q3.1.2 more than 10 transactions in one day with at least one fraud:
+  - no matching customer/day in this dataset
+- Q3.2.1 top 5 locations by fraud rate:
+  - `Singapore` -> `5.0945%`
+  - `Bangkok` -> `5.0742%`
+  - `London` -> `4.9224%`
+  - `Faisalabad` -> `4.9033%`
+  - `Kuala Lumpur` -> `4.8708%`
+- Q3.2.2 different location + more than 200 km from home:
+  - matching transactions: `30027`
+  - frauds in that subset: `1426`
+  - fraud rate: `4.7491%`
+- Q3.3.1 top merchants by total fraudulent amount:
+  - best result was `Merchant_ID 15527` and `Merchant_ID 86181`, both with total fraud amount `17`
+- Q3.3.2 credit/debit preference by category:
+  - `Grocery` is the only category with a slight credit advantage (`1.0132`)
+  - the other categories are slightly debit-heavy
+- Q3.4.1 amount more than 300% above the average:
+  - matching transactions: `6763`
+  - frauds: `337`
+  - fraud rate: `4.983%`
+- Q3.4.2 new merchant + international:
+  - matching transactions: `12598`
+  - frauds: `804`
+  - fraud rate: `6.382%`
+  - this is above the global rate `4.846%`
+- Q3.4.3 suspicious transactions with at least 3 criteria:
+  - matching transactions: `32814`
+  - frauds: `1814`
+  - fraud rate: `5.5281%`
+  - score distribution:
+    - score 3 -> `16751`
+    - score 4 -> `11413`
+    - score 5 -> `4090`
+    - score 6 -> `560`
+
 ## MongoDB Compass
 
 Connect to:
@@ -123,4 +166,4 @@ All screenshots are in the screenshots folder at the root of the repo.
 
 ## Scope reminder
 
-Only Part 1 and Part 2 are done here.
+Only Part 1, Part 2, and Part 3 are done here.
