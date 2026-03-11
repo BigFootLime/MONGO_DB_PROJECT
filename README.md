@@ -2,7 +2,7 @@
 
 This repo is for my MongoDB TP.
 
-Right now it covers Part 1, Part 2, and Part 3.
+Right now it covers Part 1, Part 2, Part 3, and Part 4.
 
 ## What I used
 
@@ -15,7 +15,7 @@ I used Docker for MongoDB because it was already working on the PC and it made t
 
 ## Files
 
-- `queries.js` -> main script for Part 1, Part 2, and Part 3
+- `queries.js` -> main script for Part 1, Part 2, Part 3, and Part 4
 - `screenshots/` -> screenshot guide and captures
 - `worklog.md` -> personal notes while doing the lab
 
@@ -72,6 +72,7 @@ It just runs the work in one place so I can redo everything after a fresh import
 - creates `transactions_lab` for update/delete questions
 - runs the Part 2 queries
 - runs the Part 3 analysis queries
+- runs the Part 4 index and performance checks
 - archives matching rows in `archive_transactions`
 
 ## Results I got on this dataset
@@ -141,9 +142,52 @@ It just runs the work in one place so I can redo everything after a fresh import
   - fraud rate: `5.5281%`
   - score distribution:
     - score 3 -> `16751`
-    - score 4 -> `11413`
-    - score 5 -> `4090`
-    - score 6 -> `560`
+  - score 4 -> `11413`
+  - score 5 -> `4090`
+  - score 6 -> `560`
+
+### Part 4
+
+- Q4.1.1 main fraud query without index:
+  - `executionTimeMillis: 19`
+  - `totalDocsExamined: 50000`
+  - `nReturned: 679`
+  - stage: `COLLSCAN`
+- Q4.1.2 three frequent queries without index:
+  - all 3 were using `COLLSCAN`
+  - each one examined `50000` documents
+- Q4.2.1 index on `Fraud_Label`:
+  - stage changed from `COLLSCAN` to `IXSCAN`
+  - `totalDocsExamined` dropped from `50000` to `2423`
+  - `executionTimeMillis` dropped from `19` to `4`
+- Q4.2.2 ESR compound index:
+  - I used existing `Customer_ID 10985` instead of the fake `CUST0012345`
+  - created index: `{ Customer_ID: 1, Transaction_Date: -1, Transaction_Amount: 1 }`
+  - `totalDocsExamined` dropped from `50000` to `6`
+  - stage: `IXSCAN`
+- Q4.2.3 index on location + merchant category:
+  - created index: `{ Transaction_Location: 1, Merchant_Category: 1 }`
+  - `totalDocsExamined` dropped from `50000` to `837`
+  - `executionTimeMillis` dropped from `18` to `1`
+- Q4.2.4 unique index on `IP_Address`:
+  - creation failed with `DuplicateKey`
+  - reason: there is one duplicate group where `IP_Address` is an empty string `""`
+  - this is a good example of what happens when duplicates exist before creating a unique index
+- Q4.3.1 partial index for fraudulent transactions over 1 million:
+  - created partial index on `Fraud_Label` + `Transaction_Amount`
+  - `totalDocsExamined` dropped from `2423` to `2152`
+- Q4.3.2 sparse index on `Previous_Fraud_Count`:
+  - missing documents: `0`
+  - null documents: `3`
+  - in this dataset, the field is almost always present, so the sparse index is more of a syntax/example answer than a strong optimization
+- Q4.3.3 index list and cleanup:
+  - weakest cleanup candidate: `idx_sparse_previous_fraud_count`
+  - note: `$indexStats` can still show `0` accesses here because most checks were done with `explain()` during the lab
+- Q4.4.1 covered query:
+  - I reused the ESR index from Q4.2.2 instead of creating a redundant extra index
+  - `totalDocsExamined: 0`
+  - `totalKeysExamined: 6`
+  - stage: `IXSCAN`
 
 ## MongoDB Compass
 
@@ -166,4 +210,4 @@ All screenshots are in the screenshots folder at the root of the repo.
 
 ## Scope reminder
 
-Only Part 1, Part 2, and Part 3 are done here.
+Only Part 1, Part 2, Part 3, and Part 4 are done here.

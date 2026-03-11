@@ -127,6 +127,52 @@ const toDate = (fieldPath) => ({
   }
 });
 
+const findStageInPlan = (node, wanted) => {
+  if (!node || typeof node !== "object") {
+    return null;
+  }
+
+  if (typeof node.stage === "string" && wanted.includes(node.stage)) {
+    return node.stage;
+  }
+
+  for (const value of Object.values(node)) {
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        const found = findStageInPlan(item, wanted);
+        if (found) {
+          return found;
+        }
+      }
+    } else if (value && typeof value === "object") {
+      const found = findStageInPlan(value, wanted);
+      if (found) {
+        return found;
+      }
+    }
+  }
+
+  return null;
+};
+
+const explainSummary = (explainResult) => ({
+  executionTimeMillis: explainResult.executionStats.executionTimeMillis,
+  totalDocsExamined: explainResult.executionStats.totalDocsExamined,
+  totalKeysExamined: explainResult.executionStats.totalKeysExamined,
+  nReturned: explainResult.executionStats.nReturned,
+  stage: findStageInPlan(explainResult.executionStats.executionStages, ["COLLSCAN", "IXSCAN"]) ||
+    findStageInPlan(explainResult.queryPlanner.winningPlan, ["COLLSCAN", "IXSCAN"]) ||
+    "UNKNOWN"
+});
+
+const compareExplain = (beforeStats, afterStats) => ({
+  before: beforeStats,
+  after: afterStats,
+  docsExaminedReduction: beforeStats.totalDocsExamined - afterStats.totalDocsExamined,
+  keysExaminedChange: afterStats.totalKeysExamined - beforeStats.totalKeysExamined,
+  executionTimeDeltaMillis: beforeStats.executionTimeMillis - afterStats.executionTimeMillis
+});
+
 section("Partie 1 - Validation de l'import brut");
 
 
@@ -1085,3 +1131,299 @@ const suspiciousTransactions = db.transactions.aggregate([
 
 print("Q3.4.3 - Suspicious transactions with at least 3 criteria:");
 printjson(suspiciousTransactions);
+
+section("Partie 4 - Indexation et Performance");
+
+const existingSecondaryIndexes = db.transactions.getIndexes()
+  .filter((index) => index.name !== "_id_")
+  .map((index) => index.name);
+
+if (existingSecondaryIndexes.length > 0) {
+  db.transactions.dropIndexes();
+}
+
+print("Indexes at the start of Part 4:");
+printjson(db.transactions.getIndexes());
+
+section("Partie 4 - 4.1 Analyse des performances sans index");
+
+const q411Query = {
+  Transaction_Amount: { $gt: 5 },
+  Fraud_Label: "Fraud",
+  Is_International_Transaction: true
+};
+
+const q411BeforeSummary = explainSummary(
+  db.transactions.find(q411Query).explain("executionStats")
+);
+
+print("Q4.1.1 - Performance without index for the main fraud query:");
+printjson({
+  query_used: q411Query,
+  metrics: q411BeforeSummary
+});
+
+const realtimeCustomerId = 10985;
+
+const realtimeQueries = [
+  {
+    label: "customer_recent_history",
+    cursor: () => db.transactions.find({ Customer_ID: realtimeCustomerId }).sort({ Transaction_Date: -1 })
+  },
+  {
+    label: "high_amount_new_international",
+    cursor: () => db.transactions.find({
+      Transaction_Amount: { $gt: 5 },
+      Is_International_Transaction: true,
+      Is_New_Merchant: true
+    })
+  },
+  {
+    label: "location_and_category_lookup",
+    cursor: () => db.transactions.find({
+      Transaction_Location: "Singapore",
+      Merchant_Category: "Electronics"
+    })
+  }
+];
+
+const realtimePerformance = realtimeQueries.map((item) => ({
+  label: item.label,
+  metrics: explainSummary(item.cursor().explain("executionStats"))
+}));
+
+print("Q4.1.2 - Three frequent queries without index:");
+printjson({
+  note: "These are realistic realtime fraud-detection lookups on the normalized dataset.",
+  queries: realtimePerformance
+});
+
+section("Partie 4 - 4.2 Strategie d'indexation");
+
+const fraudLabelIndexName = db.transactions.createIndex(
+  { Fraud_Label: 1 },
+  { name: "idx_fraud_label" }
+);
+
+const q421AfterSummary = explainSummary(
+  db.transactions.find(q411Query).explain("executionStats")
+);
+
+print("Q4.2.1 - Fraud_Label index and comparison:");
+printjson({
+  created_index: fraudLabelIndexName,
+  comparison: compareExplain(q411BeforeSummary, q421AfterSummary)
+});
+
+const q422CustomerId = realtimeCustomerId;
+const q422Query = {
+  Customer_ID: q422CustomerId,
+  Transaction_Amount: { $gte: 1, $lte: 10 }
+};
+const q422Sort = { Transaction_Date: -1 };
+
+const q422BeforeSummary = explainSummary(
+  db.transactions.find(q422Query).sort(q422Sort).explain("executionStats")
+);
+
+const q422IndexName = db.transactions.createIndex(
+  {
+    Customer_ID: 1,
+    Transaction_Date: -1,
+    Transaction_Amount: 1
+  },
+  { name: "idx_customer_date_amount_esr" }
+);
+
+const q422AfterSummary = explainSummary(
+  db.transactions.find(q422Query).sort(q422Sort).explain("executionStats")
+);
+
+print("Q4.2.2 - ESR compound index:");
+printjson({
+  query_used: {
+    filter: q422Query,
+    sort: q422Sort
+  },
+  created_index: q422IndexName,
+  order_justification: [
+    "Equality first: Customer_ID",
+    "Sort second: Transaction_Date",
+    "Range last: Transaction_Amount"
+  ],
+  comparison: compareExplain(q422BeforeSummary, q422AfterSummary)
+});
+
+const q423Query = {
+  Transaction_Location: "Singapore",
+  Merchant_Category: "Electronics"
+};
+
+const q423BeforeSummary = explainSummary(
+  db.transactions.find(q423Query).explain("executionStats")
+);
+
+const q423IndexName = db.transactions.createIndex(
+  {
+    Transaction_Location: 1,
+    Merchant_Category: 1
+  },
+  { name: "idx_location_category" }
+);
+
+const q423AfterSummary = explainSummary(
+  db.transactions.find(q423Query).explain("executionStats")
+);
+
+print("Q4.2.3 - Location + merchant category index:");
+printjson({
+  query_used: q423Query,
+  created_index: q423IndexName,
+  comparison: compareExplain(q423BeforeSummary, q423AfterSummary)
+});
+
+const duplicateIpGroups = db.transactions.aggregate([
+  { $group: { _id: "$IP_Address", count: { $sum: 1 } } },
+  { $match: { _id: { $ne: null }, count: { $gt: 1 } } },
+  { $sort: { count: -1, _id: 1 } }
+]).toArray();
+
+let uniqueIpIndexResult;
+
+try {
+  uniqueIpIndexResult = {
+    status: "created",
+    name: db.transactions.createIndex(
+      { IP_Address: 1 },
+      { name: "uniq_ip_address", unique: true }
+    )
+  };
+} catch (error) {
+  uniqueIpIndexResult = {
+    status: "failed",
+    code: error.code,
+    codeName: error.codeName,
+    message: error.message
+  };
+}
+
+print("Q4.2.4 - Unique index on IP_Address:");
+printjson({
+  duplicate_ip_groups: duplicateIpGroups.length,
+  duplicate_ip_sample: duplicateIpGroups.slice(0, 5),
+  unique_index_result: uniqueIpIndexResult,
+  note: "If duplicates exist, MongoDB rejects the unique index with a duplicate key error. The fix is to find duplicates, clean them, then retry."
+});
+
+section("Partie 4 - 4.3 Index avances");
+
+const q431Query = {
+  Fraud_Label: "Fraud",
+  Transaction_Amount: { $gt: 1 }
+};
+
+const q431BeforeSummary = explainSummary(
+  db.transactions.find(q431Query).explain("executionStats")
+);
+
+const q431IndexName = db.transactions.createIndex(
+  {
+    Fraud_Label: 1,
+    Transaction_Amount: 1
+  },
+  {
+    name: "idx_partial_fraud_amount_gt1",
+    partialFilterExpression: {
+      Fraud_Label: "Fraud",
+      Transaction_Amount: { $gt: 1 }
+    }
+  }
+);
+
+const q431AfterSummary = explainSummary(
+  db.transactions.find(q431Query).explain("executionStats")
+);
+
+print("Q4.3.1 - Partial index for fraudulent transactions over 1 million:");
+printjson({
+  query_used: q431Query,
+  created_index: q431IndexName,
+  comparison: compareExplain(q431BeforeSummary, q431AfterSummary),
+  why_useful: "The index stays smaller because it only stores the risky subset used by this query."
+});
+
+const missingPreviousFraudCount = db.transactions.countDocuments({ Previous_Fraud_Count: { $exists: false } });
+const nullPreviousFraudCount = db.transactions.countDocuments({ Previous_Fraud_Count: null });
+
+const q432IndexName = db.transactions.createIndex(
+  { Previous_Fraud_Count: 1 },
+  { name: "idx_sparse_previous_fraud_count", sparse: true }
+);
+
+print("Q4.3.2 - Sparse index on Previous_Fraud_Count:");
+printjson({
+  created_index: q432IndexName,
+  missing_documents: missingPreviousFraudCount,
+  null_documents: nullPreviousFraudCount,
+  difference_with_normal_index: "A sparse index skips documents where the field is missing, while a normal index keeps an entry for them."
+});
+
+const indexSizes = db.transactions.stats().indexSizes;
+const indexUsage = db.transactions.aggregate([{ $indexStats: {} }]).toArray();
+
+const allIndexes = db.transactions.getIndexes().map((index) => {
+  const usage = indexUsage.find((item) => item.name === index.name);
+
+  return {
+    name: index.name,
+    key: index.key,
+    unique: index.unique === true,
+    sparse: index.sparse === true,
+    partial: !!index.partialFilterExpression,
+    size_bytes: indexSizes[index.name] || 0,
+    accesses_ops: usage ? usage.accesses.ops : 0
+  };
+});
+
+const cleanupCandidates = allIndexes
+  .filter((index) => index.name !== "_id_")
+  .filter((index) => !["uniq_ip_address"].includes(index.name))
+  .filter((index) => index.accesses_ops === 0 || (index.name === "idx_sparse_previous_fraud_count" && missingPreviousFraudCount === 0))
+  .map((index) => index.name);
+
+print("Q4.3.3 - Index list, sizes, and possible cleanup:");
+printjson({
+  indexes: allIndexes,
+  cleanup_candidates: cleanupCandidates,
+  cleanup_note: cleanupCandidates.length === 0
+    ? "No obvious unused or redundant index in the tested workload."
+    : "These indexes are the weakest candidates based on current usage and dataset shape.",
+  stats_note: "Most tests in this TP use explain(), so $indexStats can still show 0 accesses even when an index clearly helps the query plan."
+});
+
+section("Partie 4 - 4.4 Index couvrants");
+
+const q441Query = { Customer_ID: q422CustomerId };
+const q441Projection = {
+  Customer_ID: 1,
+  Transaction_Amount: 1,
+  Transaction_Date: 1,
+  _id: 0
+};
+
+const q441Summary = explainSummary(
+  db.transactions.find(q441Query, q441Projection)
+    .hint("idx_customer_date_amount_esr")
+    .explain("executionStats")
+);
+
+print("Q4.4.1 - Covered query check:");
+printjson({
+  query_used: {
+    filter: q441Query,
+    projection: q441Projection,
+    hint: "idx_customer_date_amount_esr"
+  },
+  note: "I reused the ESR index from Q4.2.2 because it already contains the filter field and all projected fields.",
+  metrics: q441Summary
+});
