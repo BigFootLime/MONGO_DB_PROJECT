@@ -2,7 +2,7 @@
 
 This repo is for my MongoDB TP.
 
-Right now it covers Part 1, Part 2, Part 3, and Part 4.
+Right now it covers Part 1, Part 2, Part 3, Part 4, and Part 5.
 
 ## What I used
 
@@ -15,7 +15,7 @@ I used Docker for MongoDB because it was already working on the PC and it made t
 
 ## Files
 
-- `queries.js` -> main script for Part 1, Part 2, Part 3, and Part 4
+- `queries.js` -> main script for Part 1, Part 2, Part 3, Part 4, and Part 5
 - `screenshots/` -> screenshot guide and captures
 - `worklog.md` -> personal notes while doing the lab
 
@@ -73,6 +73,7 @@ It just runs the work in one place so I can redo everything after a fresh import
 - runs the Part 2 queries
 - runs the Part 3 analysis queries
 - runs the Part 4 index and performance checks
+- runs the Part 5 aggregation, lookup, and materialized-view queries
 - archives matching rows in `archive_transactions`
 
 ## Results I got on this dataset
@@ -189,6 +190,43 @@ It just runs the work in one place so I can redo everything after a fresh import
   - `totalKeysExamined: 6`
   - stage: `IXSCAN`
 
+### Part 5
+
+- Q5.1.1 stats by card type:
+  - `Debit` -> `25106` transactions, total amount `125167`, average `4.9865`
+  - `Credit` -> `24891` transactions, total amount `124769`, average `5.0134`
+- Q5.1.2 merchant categories with fraud rate above 10%:
+  - none after excluding malformed blank categories
+- Q5.1.3 top 20 customers by account balance:
+  - the maximum observed balance is `39`
+  - several customers share that same top value, so the ranking is mostly a tie list
+- Q5.2.1 weekly fraud analysis:
+  - highest fraud count appears in week `2` and week `6` with `154` frauds each
+  - the highest weekly fraud amount is week `8` with `796`
+- Q5.2.2 fraud-history groups:
+  - `Group 1 - clean` -> `4.7415%`
+  - `Group 2 - moderate risk` -> `4.951%`
+  - `Group 3 - high risk` -> `0` matching rows in this dataset
+- Q5.2.3 peak fraud hours by ratio:
+  - `21h` is the riskiest hour with `5.7702%`
+  - then `13h` with `5.4781%`
+- Q5.3.1 merchants lookup:
+  - created `10` fictive merchants
+  - joined `20` fraudulent transactions with merchant details
+  - total fraud amount in the joined sample set: `94`
+- Q5.3.2 customer risk profiles:
+  - created `20` fictive customers
+  - highest profile score: customer `43223` with score `22`
+  - then customer `28195` with score `21`
+- Q5.4.1 top 50 suspicion scores:
+  - top 50 transactions average score: `14`
+  - real frauds inside the top 50: `3`
+  - fraud rate in top 50: `6%`
+- Q5.4.2 materialized daily fraud stats:
+  - created collection `daily_fraud_stats`
+  - document count: `121`
+  - the collection can be refreshed by rerunning the pipeline daily
+
 ## MongoDB Compass
 
 Connect to:
@@ -210,4 +248,4 @@ All screenshots are in the screenshots folder at the root of the repo.
 
 ## Scope reminder
 
-Only Part 1, Part 2, Part 3, and Part 4 are done here.
+Only Part 1, Part 2, Part 3, Part 4, and Part 5 are done here.

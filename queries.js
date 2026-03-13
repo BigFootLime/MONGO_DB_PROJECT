@@ -127,6 +127,25 @@ const toDate = (fieldPath) => ({
   }
 });
 
+const toHour = (fieldPath) => ({
+  $convert: {
+    input: {
+      $arrayElemAt: [
+        {
+          $split: [
+            { $ifNull: [fieldPath, ""] },
+            ":"
+          ]
+        },
+        0
+      ]
+    },
+    to: "int",
+    onError: null,
+    onNull: null
+  }
+});
+
 const findStageInPlan = (node, wanted) => {
   if (!node || typeof node !== "object") {
     return null;
@@ -599,15 +618,16 @@ const fraudsByHour = db.transactions.aggregate([
   {
     $project: {
       fraud_hour: {
-        $toInt: {
-          $arrayElemAt: [
-            { $split: ["$Transaction_Time", ":"] },
-            0
-          ]
+        $let: {
+          vars: {
+            parsedHour: toHour("$Transaction_Time")
+          },
+          in: "$$parsedHour"
         }
       }
     }
   },
+  { $match: { fraud_hour: { $ne: null } } },
   {
     $group: {
       _id: "$fraud_hour",
@@ -1426,4 +1446,826 @@ printjson({
   },
   note: "I reused the ESR index from Q4.2.2 because it already contains the filter field and all projected fields.",
   metrics: q441Summary
+});
+
+section("Partie 5 - Agregation et Analyse Avancee");
+
+section("Partie 5 - 5.1 Pipelines d'agregation basiques");
+
+const q511CardTypeStats = db.transactions.aggregate([
+  {
+    $match: {
+      Card_Type: { $nin: [null, ""] }
+    }
+  },
+  {
+    $group: {
+      _id: "$Card_Type",
+      total_transaction_amount: { $sum: "$Transaction_Amount" },
+      average_transaction_amount: { $avg: "$Transaction_Amount" },
+      transaction_count: { $sum: 1 }
+    }
+  },
+  {
+    $project: {
+      _id: 0,
+      Card_Type: "$_id",
+      total_transaction_amount: { $round: ["$total_transaction_amount", 4] },
+      average_transaction_amount: { $round: ["$average_transaction_amount", 4] },
+      transaction_count: 1
+    }
+  },
+  { $sort: { total_transaction_amount: -1, Card_Type: 1 } }
+]).toArray();
+
+print("Q5.1.1 - Stats by card type:");
+printjson(q511CardTypeStats);
+
+const q512MerchantFraudStats = db.transactions.aggregate([
+  {
+    $match: {
+      Merchant_Category: { $nin: [null, ""] }
+    }
+  },
+  {
+    $group: {
+      _id: "$Merchant_Category",
+      total_transactions: { $sum: 1 },
+      fraud_count: {
+        $sum: {
+          $cond: [
+            { $eq: ["$Fraud_Label", "Fraud"] },
+            1,
+            0
+          ]
+        }
+      },
+      average_fraud_amount_raw: {
+        $avg: {
+          $cond: [
+            { $eq: ["$Fraud_Label", "Fraud"] },
+            "$Transaction_Amount",
+            null
+          ]
+        }
+      }
+    }
+  },
+  {
+    $project: {
+      _id: 0,
+      Merchant_Category: "$_id",
+      total_transactions: 1,
+      fraud_count: 1,
+      fraud_rate_percent: {
+        $round: [
+          {
+            $cond: [
+              { $eq: ["$total_transactions", 0] },
+              0,
+              {
+                $multiply: [
+                  { $divide: ["$fraud_count", "$total_transactions"] },
+                  100
+                ]
+              }
+            ]
+          },
+          4
+        ]
+      },
+      average_fraud_amount: { $round: [{ $ifNull: ["$average_fraud_amount_raw", 0] }, 4] }
+    }
+  },
+  { $match: { fraud_rate_percent: { $gt: 10 } } },
+  { $sort: { fraud_rate_percent: -1, Merchant_Category: 1 } }
+]).toArray();
+
+print("Q5.1.2 - Merchant categories with fraud rate above 10%:");
+printjson(q512MerchantFraudStats);
+
+const q513TopBalances = db.transactions.aggregate([
+  {
+    $match: {
+      Customer_ID: { $ne: null },
+      Account_Balance: { $ne: null }
+    }
+  },
+  {
+    $group: {
+      _id: "$Customer_ID",
+      highest_account_balance: { $max: "$Account_Balance" },
+      total_transactions: { $sum: 1 }
+    }
+  },
+  {
+    $project: {
+      _id: 0,
+      Customer_ID: "$_id",
+      Account_Balance: "$highest_account_balance",
+      total_transactions: 1
+    }
+  },
+  { $sort: { Account_Balance: -1, Customer_ID: 1 } },
+  { $limit: 20 }
+]).toArray();
+
+print("Q5.1.3 - Top 20 customers by account balance:");
+printjson(q513TopBalances);
+
+section("Partie 5 - 5.2 Groupements et calculs complexes");
+
+const q521WeeklyFraudAnalysis = db.transactions.aggregate([
+  {
+    $match: {
+      Transaction_Date: { $ne: null }
+    }
+  },
+  {
+    $group: {
+      _id: {
+        isoWeekYear: { $isoWeekYear: "$Transaction_Date" },
+        isoWeek: { $isoWeek: "$Transaction_Date" }
+      },
+      total_transactions: { $sum: 1 },
+      fraud_count: {
+        $sum: {
+          $cond: [
+            { $eq: ["$Fraud_Label", "Fraud"] },
+            1,
+            0
+          ]
+        }
+      },
+      total_fraud_amount: {
+        $sum: {
+          $cond: [
+            { $eq: ["$Fraud_Label", "Fraud"] },
+            "$Transaction_Amount",
+            0
+          ]
+        }
+      },
+      average_fraud_amount_raw: {
+        $avg: {
+          $cond: [
+            { $eq: ["$Fraud_Label", "Fraud"] },
+            "$Transaction_Amount",
+            null
+          ]
+        }
+      }
+    }
+  },
+  {
+    $project: {
+      _id: 0,
+      iso_week_year: "$_id.isoWeekYear",
+      iso_week: "$_id.isoWeek",
+      total_transactions: 1,
+      fraud_count: 1,
+      total_fraud_amount: { $round: ["$total_fraud_amount", 4] },
+      average_fraud_amount: { $round: [{ $ifNull: ["$average_fraud_amount_raw", 0] }, 4] }
+    }
+  },
+  { $sort: { iso_week_year: 1, iso_week: 1 } }
+]).toArray();
+
+print("Q5.2.1 - Weekly fraud analysis:");
+printjson(q521WeeklyFraudAnalysis);
+
+const q522FraudHistoryGroupsRaw = db.transactions.aggregate([
+  {
+    $match: {
+      Previous_Fraud_Count: { $ne: null }
+    }
+  },
+  {
+    $addFields: {
+      history_group: {
+        $switch: {
+          branches: [
+            { case: { $eq: ["$Previous_Fraud_Count", 0] }, then: "Group 1 - clean" },
+            {
+              case: {
+                $and: [
+                  { $gte: ["$Previous_Fraud_Count", 1] },
+                  { $lte: ["$Previous_Fraud_Count", 2] }
+                ]
+              },
+              then: "Group 2 - moderate risk"
+            },
+            { case: { $gt: ["$Previous_Fraud_Count", 2] }, then: "Group 3 - high risk" }
+          ],
+          default: null
+        }
+      }
+    }
+  },
+  {
+    $match: {
+      history_group: { $ne: null }
+    }
+  },
+  {
+    $group: {
+      _id: "$history_group",
+      total_transactions: { $sum: 1 },
+      current_fraud_count: {
+        $sum: {
+          $cond: [
+            { $eq: ["$Fraud_Label", "Fraud"] },
+            1,
+            0
+          ]
+        }
+      },
+      average_transaction_amount: { $avg: "$Transaction_Amount" }
+    }
+  },
+  {
+    $project: {
+      _id: 0,
+      history_group: "$_id",
+      total_transactions: 1,
+      current_fraud_count: 1,
+      current_fraud_rate_percent: {
+        $round: [
+          {
+            $cond: [
+              { $eq: ["$total_transactions", 0] },
+              0,
+              {
+                $multiply: [
+                  { $divide: ["$current_fraud_count", "$total_transactions"] },
+                  100
+                ]
+              }
+            ]
+          },
+          4
+        ]
+      },
+      average_transaction_amount: { $round: ["$average_transaction_amount", 4] }
+    }
+  },
+  { $sort: { history_group: 1 } }
+]).toArray();
+
+const q522FraudHistoryGroups = [
+  {
+    history_group: "Group 1 - clean",
+    total_transactions: 0,
+    current_fraud_count: 0,
+    current_fraud_rate_percent: 0,
+    average_transaction_amount: 0
+  },
+  {
+    history_group: "Group 2 - moderate risk",
+    total_transactions: 0,
+    current_fraud_count: 0,
+    current_fraud_rate_percent: 0,
+    average_transaction_amount: 0
+  },
+  {
+    history_group: "Group 3 - high risk",
+    total_transactions: 0,
+    current_fraud_count: 0,
+    current_fraud_rate_percent: 0,
+    average_transaction_amount: 0
+  }
+].map((groupTemplate) => {
+  const found = q522FraudHistoryGroupsRaw.find((item) => item.history_group === groupTemplate.history_group);
+  return found || groupTemplate;
+});
+
+print("Q5.2.2 - Behaviour by previous fraud history:");
+printjson(q522FraudHistoryGroups);
+
+const q523FraudPeakHours = db.transactions.aggregate([
+  {
+    $project: {
+      hour: {
+        $let: {
+          vars: {
+            parsedHour: toHour("$Transaction_Time")
+          },
+          in: "$$parsedHour"
+        }
+      },
+      Fraud_Label: 1
+    }
+  },
+  { $match: { hour: { $ne: null } } },
+  {
+    $group: {
+      _id: "$hour",
+      total_transactions: { $sum: 1 },
+      fraud_count: {
+        $sum: {
+          $cond: [
+            { $eq: ["$Fraud_Label", "Fraud"] },
+            1,
+            0
+          ]
+        }
+      }
+    }
+  },
+  {
+    $project: {
+      _id: 0,
+      hour: "$_id",
+      total_transactions: 1,
+      fraud_count: 1,
+      fraud_ratio_percent: {
+        $round: [
+          {
+            $cond: [
+              { $eq: ["$total_transactions", 0] },
+              0,
+              {
+                $multiply: [
+                  { $divide: ["$fraud_count", "$total_transactions"] },
+                  100
+                ]
+              }
+            ]
+          },
+          4
+        ]
+      }
+    }
+  },
+  { $sort: { fraud_ratio_percent: -1, fraud_count: -1, hour: 1 } },
+  { $limit: 5 }
+]).toArray();
+
+print("Q5.2.3 - Top 5 fraud peak hours by ratio:");
+printjson(q523FraudPeakHours);
+
+section("Partie 5 - 5.3 Lookups et jointures");
+
+if (db.getCollectionNames().includes("merchants")) {
+  db.merchants.drop();
+}
+
+const merchantBaseRows = db.transactions.aggregate([
+  {
+    $match: {
+      Fraud_Label: "Fraud",
+      Merchant_ID: { $ne: null },
+      Merchant_Category: { $ne: null }
+    }
+  },
+  {
+    $group: {
+      _id: "$Merchant_ID",
+      fraud_count: { $sum: 1 },
+      Merchant_Category: { $first: "$Merchant_Category" },
+      Transaction_Location: { $first: "$Transaction_Location" }
+    }
+  },
+  { $sort: { fraud_count: -1, _id: 1 } },
+  { $limit: 10 }
+]).toArray();
+
+const merchantSeedDocs = merchantBaseRows.map((merchant, index) => ({
+  Merchant_ID: merchant._id,
+  Merchant_Name: `Merchant ${merchant._id}`,
+  Merchant_Address: `${120 + index} ${merchant.Transaction_Location} Business Street`,
+  Merchant_Category: merchant.Merchant_Category,
+  Opening_Date: new Date(Date.UTC(2016 + (index % 6), (index * 2) % 12, 5 + index))
+}));
+
+if (merchantSeedDocs.length > 0) {
+  db.merchants.insertMany(merchantSeedDocs);
+}
+
+const q531FraudMerchantReport = db.transactions.aggregate([
+  { $match: { Fraud_Label: "Fraud" } },
+  {
+    $lookup: {
+      from: "merchants",
+      localField: "Merchant_ID",
+      foreignField: "Merchant_ID",
+      as: "merchant_info"
+    }
+  },
+  { $unwind: "$merchant_info" },
+  {
+    $facet: {
+      summary: [
+        {
+          $group: {
+            _id: null,
+            joined_fraud_transactions: { $sum: 1 },
+            total_fraud_amount: { $sum: "$Transaction_Amount" }
+          }
+        },
+        {
+          $project: {
+            _id: 0,
+            joined_fraud_transactions: 1,
+            total_fraud_amount: { $round: ["$total_fraud_amount", 4] }
+          }
+        }
+      ],
+      report_sample: [
+        {
+          $project: {
+            _id: 0,
+            Transaction_ID: 1,
+            Customer_ID: 1,
+            Merchant_ID: 1,
+            Transaction_Amount: 1,
+            Transaction_Date: 1,
+            Fraud_Label: 1,
+            Merchant_Name: "$merchant_info.Merchant_Name",
+            Merchant_Address: "$merchant_info.Merchant_Address",
+            Merchant_Category: "$merchant_info.Merchant_Category",
+            Opening_Date: "$merchant_info.Opening_Date"
+          }
+        },
+        { $sort: { Transaction_Date: -1, Transaction_ID: 1 } },
+        { $limit: 20 }
+      ]
+    }
+  }
+]).toArray()[0];
+
+print("Q5.3.1 - Fraud transactions joined with merchants:");
+printjson({
+  merchants_created: db.merchants.countDocuments(),
+  summary: q531FraudMerchantReport.summary,
+  report_sample: q531FraudMerchantReport.report_sample
+});
+
+if (db.getCollectionNames().includes("customers")) {
+  db.customers.drop();
+}
+
+const customerBaseRows = db.transactions.aggregate([
+  {
+    $match: {
+      Customer_ID: { $ne: null },
+      Customer_Home_Location: { $ne: null }
+    }
+  },
+  {
+    $group: {
+      _id: "$Customer_ID",
+      Customer_Home_Location: { $first: "$Customer_Home_Location" },
+      total_transactions: { $sum: 1 }
+    }
+  },
+  { $sort: { total_transactions: -1, _id: 1 } },
+  { $limit: 20 }
+]).toArray();
+
+const accountTypes = ["Checking", "Savings", "Premium"];
+const customerSeedDocs = customerBaseRows.map((customer, index) => ({
+  Customer_ID: customer._id,
+  Customer_Name: `Client ${customer._id}`,
+  City: customer.Customer_Home_Location,
+  Account_Type: accountTypes[index % accountTypes.length],
+  Join_Date: new Date(Date.UTC(2018 + (index % 5), index % 12, 3 + index))
+}));
+
+if (customerSeedDocs.length > 0) {
+  db.customers.insertMany(customerSeedDocs);
+}
+
+const q532CustomerRiskProfiles = db.customers.aggregate([
+  {
+    $lookup: {
+      from: "transactions",
+      localField: "Customer_ID",
+      foreignField: "Customer_ID",
+      as: "transactions"
+    }
+  },
+  {
+    $addFields: {
+      total_transactions: { $size: "$transactions" },
+      current_fraud_count: {
+        $size: {
+          $filter: {
+            input: "$transactions",
+            as: "tx",
+            cond: { $eq: ["$$tx.Fraud_Label", "Fraud"] }
+          }
+        }
+      },
+      historical_fraud_count: { $ifNull: [{ $max: "$transactions.Previous_Fraud_Count" }, 0] },
+      average_transaction_amount: { $round: [{ $ifNull: [{ $avg: "$transactions.Transaction_Amount" }, 0] }, 4] },
+      international_transactions: {
+        $size: {
+          $filter: {
+            input: "$transactions",
+            as: "tx",
+            cond: { $eq: ["$$tx.Is_International_Transaction", true] }
+          }
+        }
+      },
+      unusual_transactions: {
+        $size: {
+          $filter: {
+            input: "$transactions",
+            as: "tx",
+            cond: { $eq: ["$$tx.Unusual_Time_Transaction", true] }
+          }
+        }
+      }
+    }
+  },
+  {
+    $addFields: {
+      risk_score: {
+        $add: [
+          { $multiply: ["$current_fraud_count", 10] },
+          { $multiply: ["$historical_fraud_count", 5] },
+          "$international_transactions",
+          "$unusual_transactions"
+        ]
+      }
+    }
+  },
+  {
+    $project: {
+      _id: 0,
+      Customer_ID: 1,
+      Customer_Name: 1,
+      City: 1,
+      Account_Type: 1,
+      Join_Date: 1,
+      total_transactions: 1,
+      historical_fraud_count: 1,
+      current_fraud_count: 1,
+      average_transaction_amount: 1,
+      risk_score: 1
+    }
+  },
+  { $sort: { risk_score: -1, total_transactions: -1, Customer_ID: 1 } }
+]).toArray();
+
+print("Q5.3.2 - Customer risk profiles:");
+printjson({
+  customers_created: db.customers.countDocuments(),
+  risk_score_rule: "current fraud count * 10 + historical fraud count * 5 + international transactions + unusual-time transactions",
+  profiles: q532CustomerRiskProfiles
+});
+
+section("Partie 5 - 5.4 Analyses predictives");
+
+const q541SuspicionAnalysis = db.transactions.aggregate([
+  {
+    $addFields: {
+      suspicion_score: {
+        $add: [
+          { $cond: ["$Is_International_Transaction", 3, 0] },
+          { $cond: ["$Is_New_Merchant", 2, 0] },
+          { $cond: ["$Unusual_Time_Transaction", 2, 0] },
+          { $cond: [{ $gt: ["$Distance_From_Home", 100] }, 2, 0] },
+          {
+            $cond: [
+              {
+                $gt: [
+                  "$Transaction_Amount",
+                  { $multiply: ["$Avg_Transaction_Amount", 2] }
+                ]
+              },
+              3,
+              0
+            ]
+          },
+          {
+            $cond: [
+              { $gt: ["$Failed_Transaction_Count", 0] },
+              "$Failed_Transaction_Count",
+              0
+            ]
+          }
+        ]
+      }
+    }
+  },
+  { $sort: { suspicion_score: -1, Failed_Transaction_Count: -1, Transaction_Amount: -1, Transaction_ID: 1 } },
+  { $limit: 50 },
+  {
+    $facet: {
+      summary: [
+        {
+          $group: {
+            _id: null,
+            top50_transactions: { $sum: 1 },
+            real_frauds: {
+              $sum: {
+                $cond: [
+                  { $eq: ["$Fraud_Label", "Fraud"] },
+                  1,
+                  0
+                ]
+              }
+            },
+            average_score: { $avg: "$suspicion_score" }
+          }
+        },
+        {
+          $project: {
+            _id: 0,
+            top50_transactions: 1,
+            real_frauds: 1,
+            average_score: { $round: ["$average_score", 4] },
+            fraud_rate_percent: {
+              $round: [
+                {
+                  $cond: [
+                    { $eq: ["$top50_transactions", 0] },
+                    0,
+                    {
+                      $multiply: [
+                        { $divide: ["$real_frauds", "$top50_transactions"] },
+                        100
+                      ]
+                    }
+                  ]
+                },
+                4
+              ]
+            }
+          }
+        }
+      ],
+      top50: [
+        {
+          $project: {
+            _id: 0,
+            Transaction_ID: 1,
+            Customer_ID: 1,
+            Transaction_Amount: 1,
+            Avg_Transaction_Amount: 1,
+            Distance_From_Home: 1,
+            Failed_Transaction_Count: 1,
+            Is_International_Transaction: 1,
+            Is_New_Merchant: 1,
+            Unusual_Time_Transaction: 1,
+            Fraud_Label: 1,
+            suspicion_score: 1
+          }
+        }
+      ]
+    }
+  }
+]).toArray()[0];
+
+print("Q5.4.1 - Top 50 transactions with the highest suspicion score:");
+printjson(q541SuspicionAnalysis);
+
+if (db.getCollectionNames().includes("daily_fraud_top_categories_tmp")) {
+  db.daily_fraud_top_categories_tmp.drop();
+}
+
+db.transactions.aggregate([
+  {
+    $match: {
+      Fraud_Label: "Fraud",
+      Transaction_Date: { $ne: null },
+      Merchant_Category: { $nin: [null, ""] }
+    }
+  },
+  {
+    $group: {
+      _id: {
+        date: {
+          $dateToString: {
+            format: "%Y-%m-%d",
+            date: "$Transaction_Date",
+            timezone: "UTC"
+          }
+        },
+        Merchant_Category: "$Merchant_Category"
+      },
+      fraud_count: { $sum: 1 }
+    }
+  },
+  { $sort: { "_id.date": 1, fraud_count: -1, "_id.Merchant_Category": 1 } },
+  {
+    $group: {
+      _id: "$_id.date",
+      top_fraud_categories: {
+        $push: {
+          Merchant_Category: "$_id.Merchant_Category",
+          fraud_count: "$fraud_count"
+        }
+      }
+    }
+  },
+  {
+    $project: {
+      _id: 0,
+      date: "$_id",
+      top_fraud_categories: { $slice: ["$top_fraud_categories", 3] }
+    }
+  },
+  { $out: "daily_fraud_top_categories_tmp" }
+]).toArray();
+
+db.transactions.aggregate([
+  {
+    $match: {
+      Transaction_Date: { $ne: null }
+    }
+  },
+  {
+    $group: {
+      _id: {
+        $dateToString: {
+          format: "%Y-%m-%d",
+          date: "$Transaction_Date",
+          timezone: "UTC"
+        }
+      },
+      total_transactions: { $sum: 1 },
+      fraud_transactions: {
+        $sum: {
+          $cond: [
+            { $eq: ["$Fraud_Label", "Fraud"] },
+            1,
+            0
+          ]
+        }
+      },
+      total_fraud_amount: {
+        $sum: {
+          $cond: [
+            { $eq: ["$Fraud_Label", "Fraud"] },
+            "$Transaction_Amount",
+            0
+          ]
+        }
+      }
+    }
+  },
+  {
+    $project: {
+      _id: 0,
+      date: "$_id",
+      total_transactions: 1,
+      fraud_transactions: 1,
+      total_fraud_amount: { $round: ["$total_fraud_amount", 4] },
+      fraud_rate_percent: {
+        $round: [
+          {
+            $cond: [
+              { $eq: ["$total_transactions", 0] },
+              0,
+              {
+                $multiply: [
+                  { $divide: ["$fraud_transactions", "$total_transactions"] },
+                  100
+                ]
+              }
+            ]
+          },
+          4
+        ]
+      }
+    }
+  },
+  {
+    $lookup: {
+      from: "daily_fraud_top_categories_tmp",
+      localField: "date",
+      foreignField: "date",
+      as: "top_categories_lookup"
+    }
+  },
+  {
+    $set: {
+      top_fraud_categories: {
+        $ifNull: [
+          { $arrayElemAt: ["$top_categories_lookup.top_fraud_categories", 0] },
+          []
+        ]
+      }
+    }
+  },
+  { $unset: "top_categories_lookup" },
+  { $sort: { date: 1 } },
+  { $out: "daily_fraud_stats" }
+]).toArray();
+
+if (db.getCollectionNames().includes("daily_fraud_top_categories_tmp")) {
+  db.daily_fraud_top_categories_tmp.drop();
+}
+
+const q542DailyFraudStatsSample = db.daily_fraud_stats.find({}, { _id: 0 }).sort({ date: 1 }).limit(10).toArray();
+
+print("Q5.4.2 - Materialized daily fraud stats:");
+printjson({
+  collection_name: "daily_fraud_stats",
+  update_note: "To refresh this materialized view, rerun the pipeline each day.",
+  document_count: db.daily_fraud_stats.countDocuments(),
+  sample: q542DailyFraudStatsSample
 });
