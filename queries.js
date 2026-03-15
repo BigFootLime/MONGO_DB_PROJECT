@@ -288,7 +288,7 @@ const boolNulls = {
   null_unusual_time: db.transactions.countDocuments({ Unusual_Time_Transaction: null })
 };
 
-// If these are huge (ex: 50k), it usually means the script was rerun without reimporting.
+
 if (Math.max(boolNulls.null_international, boolNulls.null_new_merchant, boolNulls.null_unusual_time) > 1000) {
   print("WARNING: too many nulls in boolean flags. Reimport the CSV with --drop, then rerun queries.js.");
 }
@@ -343,7 +343,6 @@ printjson(booleanSample);
 
 section("Partie 2 - Preparation du bac a sable CRUD");
 
-// I do the update/delete questions on a copy so the main collection stays untouched.
 db.transactions.aggregate([
   { $match: {} },
   { $out: "transactions_lab" }
@@ -435,10 +434,10 @@ printjson({
   })
 });
 
-// Categories used in Q2.2.3.
+// Categories exactly requested in the TP.
 const selectedCategoryFilter = {
   Merchant_Category: {
-    $in: ["Clothing", "Electronics", "Restaurant"]
+    $in: ["Electronics", "Jewelry", "Luxury Goods"]
   }
 };
 
@@ -458,7 +457,7 @@ const categorySample = db.transactions.find(
   }
 ).sort({ Transaction_ID: 1 }).limit(20).toArray();
 
-print("Q2.2.3 - Transactions in Clothing, Electronics, Restaurant:");
+print("Q2.2.3 - Transactions in Electronics, Jewelry, Luxury Goods:");
 printjson({
   matching_transactions: db.transactions.countDocuments(selectedCategoryFilter),
   sample_results: categorySample
@@ -468,24 +467,14 @@ section("Partie 2 - 2.3 Operations de mise a jour");
 
 
 const askedCorrection = {
-  Customer_ID: 24239,
-  Transaction_Date: ISODate("2025-01-15T00:00:00.000Z"),
+  Customer_ID: "CUST0012345",
+  Transaction_Date: ISODate("2024-01-15T00:00:00.000Z"),
   Fraud_Label: "Fraud"
 };
-
-const realCorrection = {
-  Customer_ID: 67961,
-  Transaction_Date: ISODate("2025-03-24T00:00:00.000Z"),
-  Fraud_Label: "Fraud"
-};
-
 const askedCorrectionCount = db.transactions_lab.countDocuments(askedCorrection);
-const correctionToRun = askedCorrectionCount > 0
-  ? askedCorrection
-  : realCorrection;
 
 const correctionResult = db.transactions_lab.updateMany(
-  correctionToRun,
+  askedCorrection,
   {
     $set: {
       Fraud_Label: "Normal"
@@ -497,7 +486,6 @@ print("Q2.3.1 - Correction result on transactions_lab:");
 printjson({
   requested_filter: askedCorrection,
   requested_filter_matches: askedCorrectionCount,
-  executed_filter: correctionToRun,
   result: correctionResult
 });
 
@@ -549,16 +537,12 @@ printjson(
   ]).toArray()
 );
 
-// January 2025 only, like in the corrected question.
-const january2025Start = ISODate("2025-01-01T00:00:00.000Z");
-const february2025Start = ISODate("2025-02-01T00:00:00.000Z");
+const twoYearsAgo = new Date();
+twoYearsAgo.setUTCFullYear(twoYearsAgo.getUTCFullYear() - 2);
 
 const anonymizeResult = db.transactions_lab.updateMany(
   {
-    Transaction_Date: {
-      $gte: january2025Start,
-      $lt: february2025Start
-    }
+    Transaction_Date: { $lt: twoYearsAgo }
   },
   {
     $set: {
@@ -569,10 +553,7 @@ const anonymizeResult = db.transactions_lab.updateMany(
 
 print("Q2.3.3 - IP anonymization result:");
 printjson({
-  date_window: {
-    start_inclusive: january2025Start,
-    end_exclusive: february2025Start
-  },
+  threshold_date: twoYearsAgo,
   result: anonymizeResult
 });
 
@@ -585,7 +566,7 @@ if (db.getCollectionNames().includes("archive_transactions")) {
 
 const archiveRule = {
   Fraud_Label: "Fraud",
-  Failed_Transaction_Count: { $gte: 2 }
+  Failed_Transaction_Count: { $gte: 3 }
 };
 
 printjson({
@@ -2268,4 +2249,421 @@ printjson({
   update_note: "To refresh this materialized view, rerun the pipeline each day.",
   document_count: db.daily_fraud_stats.countDocuments(),
   sample: q542DailyFraudStatsSample
+});
+
+section("Partie 6 - Requetes Expertes et Optimisation");
+
+section("Partie 6 - 6.1 Requetes complexes multi-criteres");
+
+const fraudSeriesSource = db.transactions.aggregate([
+  {
+    $match: {
+      Fraud_Label: "Fraud",
+      Customer_ID: { $ne: null },
+      Transaction_Date: { $ne: null }
+    }
+  },
+  {
+    $project: {
+      _id: 0,
+      Customer_ID: 1,
+      Transaction_ID: 1,
+      Transaction_Amount: 1,
+      Transaction_Date: 1,
+      Transaction_Time: 1
+    }
+  },
+  { $sort: { Customer_ID: 1, Transaction_Date: 1, Transaction_Time: 1, Transaction_ID: 1 } }
+]).toArray();
+
+const fraudSeriesByCustomer = new Map();
+
+for (const tx of fraudSeriesSource) {
+  if (!fraudSeriesByCustomer.has(tx.Customer_ID)) {
+    fraudSeriesByCustomer.set(tx.Customer_ID, []);
+  }
+  fraudSeriesByCustomer.get(tx.Customer_ID).push(tx);
+}
+
+const serialFraudWindows = [];
+const sevenDaysMs = 7 * 24 * 60 * 60 * 1000;
+
+for (const [customerId, frauds] of fraudSeriesByCustomer.entries()) {
+  let bestWindow = null;
+  let start = 0;
+
+  for (let end = 0; end < frauds.length; end += 1) {
+    while (frauds[end].Transaction_Date - frauds[start].Transaction_Date >= sevenDaysMs) {
+      start += 1;
+    }
+
+    const window = frauds.slice(start, end + 1);
+    if (window.length >= 3) {
+      const totalFraudAmount = window.reduce((sum, item) => sum + (item.Transaction_Amount || 0), 0);
+      const candidate = {
+        Customer_ID: customerId,
+        fraud_count_in_window: window.length,
+        total_fraud_amount: Number(totalFraudAmount.toFixed(4)),
+        fraud_dates: window.map((item) => ({
+          Transaction_ID: item.Transaction_ID,
+          Transaction_Date: item.Transaction_Date,
+          Transaction_Time: item.Transaction_Time,
+          Transaction_Amount: item.Transaction_Amount
+        }))
+      };
+
+      if (
+        !bestWindow ||
+        candidate.fraud_count_in_window > bestWindow.fraud_count_in_window ||
+        (
+          candidate.fraud_count_in_window === bestWindow.fraud_count_in_window &&
+          candidate.total_fraud_amount > bestWindow.total_fraud_amount
+        )
+      ) {
+        bestWindow = candidate;
+      }
+    }
+  }
+
+  if (bestWindow) {
+    serialFraudWindows.push(bestWindow);
+  }
+}
+
+serialFraudWindows.sort((a, b) =>
+  b.fraud_count_in_window - a.fraud_count_in_window ||
+  b.total_fraud_amount - a.total_fraud_amount ||
+  a.Customer_ID - b.Customer_ID
+);
+
+print("Q6.1.1 - Serial frauds within a 7-day window:");
+printjson(serialFraudWindows.slice(0, 20));
+
+const launderingSource = db.transactions.aggregate([
+  {
+    $match: {
+      Customer_ID: { $ne: null },
+      Merchant_Category: { $nin: [null, ""] },
+      Transaction_Date: { $ne: null },
+      Transaction_Amount: { $ne: null }
+    }
+  },
+  {
+    $project: {
+      _id: 0,
+      Customer_ID: 1,
+      Merchant_Category: 1,
+      Transaction_ID: 1,
+      Transaction_Amount: 1,
+      Transaction_Date: 1,
+      Transaction_Time: 1,
+      Fraud_Label: 1
+    }
+  },
+  { $sort: { Customer_ID: 1, Merchant_Category: 1, Transaction_Date: 1, Transaction_Time: 1, Transaction_ID: 1 } }
+]).toArray();
+
+const launderingGroups = new Map();
+
+for (const tx of launderingSource) {
+  const key = `${tx.Customer_ID}__${tx.Merchant_Category}`;
+  if (!launderingGroups.has(key)) {
+    launderingGroups.set(key, []);
+  }
+  launderingGroups.get(key).push(tx);
+}
+
+const launderingSequences = [];
+
+for (const [key, transactions] of launderingGroups.entries()) {
+  let currentSequence = [];
+
+  for (const tx of transactions) {
+    if (
+      currentSequence.length === 0 ||
+      tx.Transaction_Amount > currentSequence[currentSequence.length - 1].Transaction_Amount
+    ) {
+      currentSequence.push(tx);
+    } else {
+      if (currentSequence.length >= 4) {
+        const totalAmount = currentSequence.reduce((sum, item) => sum + item.Transaction_Amount, 0);
+        if (totalAmount > 20) {
+          launderingSequences.push({
+            Customer_ID: currentSequence[0].Customer_ID,
+            Merchant_Category: currentSequence[0].Merchant_Category,
+            sequence_length: currentSequence.length,
+            total_sequence_amount: Number(totalAmount.toFixed(4)),
+            transactions: currentSequence.map((item) => ({
+              Transaction_ID: item.Transaction_ID,
+              Transaction_Date: item.Transaction_Date,
+              Transaction_Time: item.Transaction_Time,
+              Transaction_Amount: item.Transaction_Amount,
+              Fraud_Label: item.Fraud_Label
+            }))
+          });
+        }
+      }
+      currentSequence = [tx];
+    }
+  }
+
+  if (currentSequence.length >= 4) {
+    const totalAmount = currentSequence.reduce((sum, item) => sum + item.Transaction_Amount, 0);
+    if (totalAmount > 20) {
+      launderingSequences.push({
+        Customer_ID: currentSequence[0].Customer_ID,
+        Merchant_Category: currentSequence[0].Merchant_Category,
+        sequence_length: currentSequence.length,
+        total_sequence_amount: Number(totalAmount.toFixed(4)),
+        transactions: currentSequence.map((item) => ({
+          Transaction_ID: item.Transaction_ID,
+          Transaction_Date: item.Transaction_Date,
+          Transaction_Time: item.Transaction_Time,
+          Transaction_Amount: item.Transaction_Amount,
+          Fraud_Label: item.Fraud_Label
+        }))
+      });
+    }
+  }
+}
+
+launderingSequences.sort((a, b) =>
+  b.total_sequence_amount - a.total_sequence_amount ||
+  b.sequence_length - a.sequence_length ||
+  a.Customer_ID - b.Customer_ID
+);
+
+print("Q6.1.2 - Potential money-laundering patterns:");
+printjson(launderingSequences.slice(0, 20));
+
+section("Partie 6 - 6.2 Performance ultime");
+
+const q621Candidate = db.transactions.aggregate([
+  { $match: { Fraud_Label: "Fraud", Customer_ID: { $ne: null } } },
+  {
+    $group: {
+      _id: "$Customer_ID",
+      fraud_count: { $sum: 1 }
+    }
+  },
+  { $sort: { fraud_count: -1, _id: 1 } },
+  { $limit: 1 }
+]).toArray()[0];
+
+const q621CustomerId = q621Candidate ? q621Candidate._id : 10985;
+const q621DateRange = {
+  $gte: ISODate("2025-01-01T00:00:00.000Z"),
+  $lte: ISODate("2025-12-31T00:00:00.000Z")
+};
+
+const q621Query = {
+  Customer_ID: q621CustomerId,
+  Transaction_Date: q621DateRange,
+  Fraud_Label: "Fraud"
+};
+
+const q621Sort = { Transaction_Amount: -1 };
+
+if (db.transactions.getIndexes().some((index) => index.name === "idx_customer_fraud_amount_date")) {
+  db.transactions.dropIndex("idx_customer_fraud_amount_date");
+}
+
+const q621BeforeSummary = explainSummary(
+  db.transactions.find(q621Query)
+    .sort(q621Sort)
+    .limit(10)
+    .hint("idx_fraud_label")
+    .explain("executionStats")
+);
+
+const q621IndexName = db.transactions.createIndex(
+  {
+    Customer_ID: 1,
+    Fraud_Label: 1,
+    Transaction_Amount: -1,
+    Transaction_Date: 1
+  },
+  { name: "idx_customer_fraud_amount_date" }
+);
+
+const q621AfterSummary = explainSummary(
+  db.transactions.find(q621Query).sort(q621Sort).limit(10).explain("executionStats")
+);
+
+print("Q6.2.1 - Maximum optimization for the realtime fraud query:");
+printjson({
+  query_used: {
+    filter: q621Query,
+    sort: q621Sort,
+    limit: 10
+  },
+  note: "The TP uses a fake customer ID and the year 2024. I replaced them with an existing fraudulent customer and the 2025 date range that exists in this dataset.",
+  created_index: q621IndexName,
+  comparison: compareExplain(q621BeforeSummary, q621AfterSummary)
+});
+
+const q622Query = {
+  Customer_ID: q621CustomerId,
+  Fraud_Label: "Fraud"
+};
+
+if (db.transactions.getIndexes().some((index) => index.name === "idx_customer_fraud_exists")) {
+  db.transactions.dropIndex("idx_customer_fraud_exists");
+}
+
+const q622BeforeSummary = explainSummary(
+  db.transactions.find(q622Query, { Fraud_Label: 1, _id: 0 })
+    .hint("idx_fraud_label")
+    .limit(1)
+    .explain("executionStats")
+);
+
+const q622IndexName = db.transactions.createIndex(
+  {
+    Customer_ID: 1,
+    Fraud_Label: 1
+  },
+  { name: "idx_customer_fraud_exists" }
+);
+
+const q622AfterCursor = db.transactions.find(q622Query, { Fraud_Label: 1, _id: 0 })
+  .hint("idx_customer_fraud_exists")
+  .limit(1);
+
+const q622AfterSummary = explainSummary(
+  q622AfterCursor.explain("executionStats")
+);
+
+const q622HasFraud = db.transactions.find(q622Query, { Fraud_Label: 1, _id: 0 })
+  .hint("idx_customer_fraud_exists")
+  .limit(1)
+  .toArray().length > 0;
+
+print("Q6.2.2 - Fast yes/no fraud history check:");
+printjson({
+  query_used: q622Query,
+  created_index: q622IndexName,
+  has_committed_fraud: q622HasFraud,
+  target_under_10ms: q622AfterSummary.executionTimeMillis < 10,
+  comparison: compareExplain(q622BeforeSummary, q622AfterSummary)
+});
+
+section("Partie 6 - 6.3 Vue et securite");
+
+if (db.getCollectionInfos({ name: "public_transactions" }).length > 0) {
+  db.public_transactions.drop();
+}
+
+const latestTransactionDate = db.transactions.aggregate([
+  {
+    $group: {
+      _id: null,
+      maxDate: { $max: "$Transaction_Date" }
+    }
+  }
+]).toArray()[0].maxDate;
+
+const publicTransactionsCutoff = new Date(latestTransactionDate);
+publicTransactionsCutoff.setUTCDate(publicTransactionsCutoff.getUTCDate() - 30);
+
+db.createView(
+  "public_transactions",
+  "transactions",
+  [
+    {
+      $match: {
+        Transaction_Date: { $gte: publicTransactionsCutoff }
+      }
+    },
+    {
+      $project: {
+        IP_Address: 0,
+        Device_ID: 0,
+        Customer_Home_Location: 0
+      }
+    }
+  ]
+);
+
+print("Q6.3.1 - public_transactions view:");
+printjson({
+  view_name: "public_transactions",
+  reference_date_used: latestTransactionDate,
+  cutoff_date: publicTransactionsCutoff,
+  visible_documents: db.public_transactions.countDocuments(),
+  sample: db.public_transactions.find({}, { _id: 0 }).limit(5).toArray()
+});
+
+if (db.getCollectionInfos({ name: "fraud_summary_by_merchant_category" }).length > 0) {
+  db.fraud_summary_by_merchant_category.drop();
+}
+
+db.createView(
+  "fraud_summary_by_merchant_category",
+  "transactions",
+  [
+    {
+      $match: {
+        Merchant_Category: { $nin: [null, ""] }
+      }
+    },
+    {
+      $group: {
+        _id: "$Merchant_Category",
+        total_transactions: { $sum: 1 },
+        fraud_transactions: {
+          $sum: {
+            $cond: [
+              { $eq: ["$Fraud_Label", "Fraud"] },
+              1,
+              0
+            ]
+          }
+        },
+        total_fraud_amount: {
+          $sum: {
+            $cond: [
+              { $eq: ["$Fraud_Label", "Fraud"] },
+              "$Transaction_Amount",
+              0
+            ]
+          }
+        }
+      }
+    },
+    {
+      $project: {
+        _id: 0,
+        Merchant_Category: "$_id",
+        total_transactions: 1,
+        fraud_transactions: 1,
+        total_fraud_amount: { $round: ["$total_fraud_amount", 4] },
+        fraud_rate_percent: {
+          $round: [
+            {
+              $cond: [
+                { $eq: ["$total_transactions", 0] },
+                0,
+                {
+                  $multiply: [
+                    { $divide: ["$fraud_transactions", "$total_transactions"] },
+                    100
+                  ]
+                }
+              ]
+            },
+            4
+          ]
+        }
+      }
+    },
+    { $sort: { fraud_rate_percent: -1, Merchant_Category: 1 } }
+  ]
+);
+
+print("Q6.3.2 - fraud_summary_by_merchant_category view:");
+printjson({
+  view_name: "fraud_summary_by_merchant_category",
+  document_count: db.fraud_summary_by_merchant_category.countDocuments(),
+  sample: db.fraud_summary_by_merchant_category.find({}, { _id: 0 }).limit(10).toArray()
 });

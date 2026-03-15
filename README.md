@@ -2,7 +2,6 @@
 
 This repo is for my MongoDB TP.
 
-Right now it covers Part 1, Part 2, Part 3, Part 4, and Part 5.
 
 ## What I used
 
@@ -15,9 +14,9 @@ I used Docker for MongoDB because it was already working on the PC and it made t
 
 ## Files
 
-- `queries.js` -> main script for Part 1, Part 2, Part 3, Part 4, and Part 5
+- `queries.js` -> main script for Part 1, Part 2, Part 3, Part 4, Part 5, and Part 6
 - `screenshots/` -> screenshot guide and captures
-- `worklog.md` -> personal notes while doing the lab
+
 
 ## Start the database
 
@@ -74,6 +73,7 @@ It just runs the work in one place so I can redo everything after a fresh import
 - runs the Part 3 analysis queries
 - runs the Part 4 index and performance checks
 - runs the Part 5 aggregation, lookup, and materialized-view queries
+- runs the Part 6 expert queries, optimized lookups, and secure views
 - archives matching rows in `archive_transactions`
 
 ## Results I got on this dataset
@@ -97,13 +97,12 @@ It just runs the work in one place so I can redo everything after a fresh import
 - highest amount: `9`
 - highest transaction id: `100156`
 - label of the highest transaction: `Normal`
-- Q2.2.3 with `Clothing`, `Electronics`, `Restaurant`: `24980` rows
+- Q2.2.3 with `Electronics`, `Jewelry`, `Luxury Goods`: `8216` rows
 - Q2.3.1:
-  - asked pair `24239` on `2025-01-15` -> `0` match
-  - real fallback pair used in the update -> `67961` on `2025-03-24`
-  - result -> `1` matched and `1` modified
-- Q2.3.3 January 2025 anonymization -> `12691` matched and `12691` modified
-- Q2.4.1 with `Failed_Transaction_Count >= 2` -> `772` archived and `772` deleted from `transactions_lab`
+  - exact TP filter used: `Customer_ID = "CUST0012345"` and `Transaction_Date = 2024-01-15`
+  - result -> `0` matched and `0` modified on this dataset
+- Q2.3.3 anonymization of transactions older than 2 years -> `0` matched and `0` modified on this dataset
+- Q2.4.1 with `Failed_Transaction_Count >= 3` -> `0` archived and `0` deleted from `transactions_lab`
 
 ### Part 3
 
@@ -227,6 +226,36 @@ It just runs the work in one place so I can redo everything after a fresh import
   - document count: `121`
   - the collection can be refreshed by rerunning the pipeline daily
 
+### Part 6
+
+- Q6.1.1 serial frauds in a 7-day window:
+  - no customer matched the rule `at least 3 fraudulent transactions in 7 days`
+- Q6.1.2 potential money-laundering sequences:
+  - no sequence matched all 4 conditions in this dataset
+- Q6.2.1 maximum optimization of the realtime fraud query:
+  - real customer used: `41045`
+  - date range adjusted to `2025` because the dataset does not contain `2024`
+  - created index: `{ Customer_ID: 1, Fraud_Label: 1, Transaction_Amount: -1, Transaction_Date: 1 }`
+  - docs examined dropped from `2423` to `3`
+  - execution time dropped from `2 ms` to `0 ms`
+- Q6.2.2 fast yes/no fraud history check:
+  - created index: `{ Customer_ID: 1, Fraud_Label: 1 }`
+  - result for customer `41045`: `true`
+  - target under `10 ms`: reached
+  - docs examined dropped from `887` to `0`
+- Q6.3.1 secure public view:
+  - created view `public_transactions`
+  - sensitive fields hidden:
+    - `IP_Address`
+    - `Device_ID`
+    - `Customer_Home_Location`
+  - visible documents: `12872`
+  - to keep the view useful with this dataset, the 30-day filter uses the latest date in the file (`2025-05-01`) as reference
+- Q6.3.2 merchant-category summary view:
+  - created view `fraud_summary_by_merchant_category`
+  - document count: `6`
+  - highest fraud-rate category in the view: `Restaurant` with `5.0336%`
+
 ## MongoDB Compass
 
 Connect to:
@@ -246,6 +275,4 @@ Then open `fraudshield_banking` and check:
 
 All screenshots are in the screenshots folder at the root of the repo.
 
-## Scope reminder
 
-Only Part 1, Part 2, Part 3, Part 4, and Part 5 are done here.
